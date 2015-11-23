@@ -388,9 +388,12 @@ def process_resolution():
 def read_data():
     # --- read data --- #
     timer = time.clock()
-    data = []
+    data = None
     for ifile in args.filelist:
-        data.extend(args.infun(ifile))
+        if data is None:
+            data = args.infun(ifile)
+        else:
+            data = np.concatenate((data, args.infun(ifile)), axis=0)
     timer = time.clock() - timer
 
     if args.verbose > 0:
@@ -404,14 +407,15 @@ def read_data():
 
 def square_frames(data):
     timer = time.clock()
-    for idx in args.include(data):
-        data[idx] = ensure_square(data[idx])
+    square = [ensure_square(data[idx]) for idx in args.include(data)]
     timer = time.clock() - timer
 
     if args.verbose > 0:
         w, h = data[0].shape
         sys.stdout.write('<frames width={}, height={}, elapsed={}>' \
                          'ensure square</frames>\n'.format(w, h, timer))
+
+    return square
 #end square_frames
 
 
@@ -563,7 +567,7 @@ def main ():
 
     data = read_data()
 
-    square_frames(data)
+    data = square_frames(data)
 
     frameMasks = mask_frames(data)
 
