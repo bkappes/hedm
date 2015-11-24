@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python
 """
 DESCRIPTION
@@ -359,8 +360,8 @@ def process_output_options():
 def process_peak_search():
     global args
     # set the default steps
-    if args.peakstep is None:
-        args.peakstep = [0.1]
+    if args.peakthreshold is None:
+        args.peakthreshold = [0.1]
 
     # set the number of times these peak steps should be applied
     if args.peakreps < 1:
@@ -368,7 +369,7 @@ def process_peak_search():
                          'specified.')
     if args.verbose > 0:
         sys.stdout.write('<option value={}x{}>peak search' \
-                         '</option>\n'.format(args.peakreps, args.peakstep))
+                         '</option>\n'.format(args.peakreps, args.peakthreshold))
 
 def process_program_name():
     global args
@@ -508,7 +509,7 @@ def multiply_intensity_by_negative_laplacian(data):
 
 
 def optimized_frames_kernel(frame, mask):
-    return clean(frame*mask, threshold=args.peakreps*args.peakstep)
+    return clean(frame*mask, threshold=args.peakreps*args.peakthreshold)
     
 def optimized_frames(data, frameMasks):
     timer = time.clock()
@@ -769,8 +770,9 @@ if __name__ == '__main__':
                             help='Number of times to repeat the peak search ' \
                             'steps constructed by calls to ' \
                             '"--peak-stepsize". Default: 20.')
-        parser.add_argument('--ps', '--peak-stepsize',
-                            dest='peakstep',
+        parser.add_argument('--pt', '--peak-threshold',
+                            metavar='THRESHOLD',
+                            dest='peakthreshold',
                             action='append',
                             type=float,
                             default=None,
