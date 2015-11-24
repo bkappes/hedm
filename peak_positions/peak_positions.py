@@ -23,6 +23,9 @@ from matplotlib import pyplot as plt
 from scipy.ndimage import gaussian_filter
 from skimage import measure
 from skimage.morphology import reconstruction
+# --- parallel
+from joblib import Parallel, delayed
+import multiprocessing
 
 
 __version__ = 0.1
@@ -251,35 +254,19 @@ def gaussian_convolution(arr, sigma=1.0, width=None):
 
 
 def process_commandline():
-    process_program_name()
-    process_filelist()
     process_background_noise_threshold()
     process_colormap()
     process_input_formats()
-    process_output_options()
+    process_filelist()
     process_frame_number()
-    process_treeline()
+    process_nproc()
+    process_output_options()
     process_peak_search()
+    process_program_name()
+    process_resolution()
     process_search_axis()
     process_sigma()
-    process_resolution()
-
-def process_program_name():
-    global args
-    # --- print version information --- #
-    if args.verbose > 0:
-        path, util = os.path.split(sys.argv[0])
-        util, ext = os.path.splitext(util)
-        sys.stdout.write('<prog version={}>{}'\
-                         '<\prog>\n'.format(__version__, util))
-
-def process_filelist():
-    global args
-    if args.verbose > 0:
-        sys.stdout.write('<input type="vector">\n')
-        for ifile in args.filelist:
-            sys.stdout.write('  {}\n'.format(ifile))
-        sys.stdout.write('</input>\n')
+    process_treeline()
 
 def process_background_noise_threshold():
     global args
@@ -292,6 +279,30 @@ def process_colormap():
     if args.verbose > 0:
         sys.stdout.write('<option value={}>color map' \
                          '</option>\n'.format(args.cmap))
+
+def process_filelist():
+    global args
+    if args.verbose > 0:
+        sys.stdout.write('<input type="vector">\n')
+        for ifile in args.filelist:
+            sys.stdout.write('  {}\n'.format(ifile))
+        sys.stdout.write('</input>\n')
+
+def process_frame_number():
+    global args
+    # over what indices should we operate?
+    if args.verbose > 0:
+        sys.stdout.write('<option value={}>frame index' \
+                         '</option>\n'.format(args.include))
+    try:
+        idx = int(args.include)
+        args.include = lambda vec: [idx]
+    except ValueError:
+        if args.include == 'all':
+            args.include = lambda vec: xrange(len(vec))
+        else:
+            raise ValueError('Unrecognized include action: ' \
+                             '{}'.format(args.include))
 
 def process_input_formats():
     global args
@@ -321,6 +332,20 @@ def process_input_formats():
         raise ValueError('Input format ({}) is not ' \
                          'recognized.'.format(inputFormat))
 
+def process_nproc():
+    global args
+    maxproc = multiprocessing.cpu_count()
+    if args.nproc is None:
+        args.nproc = 1
+    elif args.nproc < 1 or args.nproc > maxproc:
+        args.nproc = maxproc
+    else:
+        # then args.nproc already set
+        pass
+    if args.verbose > 0:
+        sys.stdout.write('<option value={}>no. procs' \
+                         '</option>\n'.format(args.nproc))
+        
 def process_output_options():
     global args
     if args.output is None:
@@ -330,32 +355,6 @@ def process_output_options():
         if args.verbose > 0:
             sys.stdout.write('<option value={}>output prefix' \
                              '</option>\n'.format(args.output))
-
-def process_frame_number():
-    global args
-    # over what indices should we operate?
-    if args.verbose > 0:
-        sys.stdout.write('<option value={}>frame index' \
-                         '</option>\n'.format(args.include))
-    try:
-        idx = int(args.include)
-        args.include = lambda vec: [idx]
-    except ValueError:
-        if args.include == 'all':
-            args.include = lambda vec: xrange(len(vec))
-        else:
-            raise ValueError('Unrecognized include action: ' \
-                             '{}'.format(args.include))
-
-def process_treeline():
-    global args
-    # validate numerical options
-    if not 0.0 < args.treeline < 1.0:
-        raise ValueError('Treeline must be set between 0.0 and 1.0, ' \
-                         'exclusive.')
-    if args.verbose > 0:
-        sys.stdout.write('<option value={}>treeline' \
-                         '</option>\n'.format(args.treeline))
 
 def process_peak_search():
     global args
@@ -371,6 +370,21 @@ def process_peak_search():
         sys.stdout.write('<option value={}x{}>peak search' \
                          '</option>\n'.format(args.peakreps, args.peakstep))
 
+def process_program_name():
+    global args
+    # --- print version information --- #
+    if args.verbose > 0:
+        path, util = os.path.split(sys.argv[0])
+        util, ext = os.path.splitext(util)
+        sys.stdout.write('<prog version={}>{}'\
+                         '<\prog>\n'.format(__version__, util))
+
+def process_resolution():
+    global args
+    if args.verbose > 0:
+        sys.stdout.write('<option value={}>resolution' \
+                         '</option>\n'.format(args.resolution))
+
 def process_search_axis():
     global args
     if args.verbose > 0:
@@ -383,11 +397,15 @@ def process_sigma():
         sys.stdout.write('<option value={}>sigma' \
                          '</option>\n'.format(args.sigma))
 
-def process_resolution():
+def process_treeline():
     global args
+    # validate numerical options
+    if not 0.0 < args.treeline < 1.0:
+        raise ValueError('Treeline must be set between 0.0 and 1.0, ' \
+                         'exclusive.')
     if args.verbose > 0:
-        sys.stdout.write('<option value={}>resolution' \
-                         '</option>\n'.format(args.resolution))
+        sys.stdout.write('<option value={}>treeline' \
+                         '</option>\n'.format(args.treeline))
 
 
 
@@ -406,7 +424,6 @@ def read_data():
         num, w, h = data.shape
         sys.stdout.write('<frames width={}, height={}, count={}, elapsed={}>' \
                          'read</frames>\n'.format(w, h, num, timer))
-
     return data
 #end read_data    
 
@@ -427,15 +444,17 @@ def square_frames(data):
 
 def mask_frames(data):
     timer = time.clock()
-    try:
+    # --- serial --- #
+    if args.nproc == 1:
         frameMasks = np.array([
             gaussian_filter(data[idx], sigma=args.sigma) > args.background
             for idx in args.include(data)])
-    except:
-        print '<<< Failed>>>'
-        print '   data.shape = {}'.format(data.shape)
-        print '   frameMasks.shape = {}'.format(frameMasks.shape)
-        raise
+    # --- parallel --- #
+    else:
+        frameMasks = np.array(
+            Parallel(n_jobs=args.nproc)(
+                delayed(gaussian_filter)(data[idx], sigma=args.sigma)
+                for idx in args.include(data))) > args.background
     timer = time.clock() - timer
 
     if args.verbose > 0:
@@ -448,138 +467,179 @@ def mask_frames(data):
 #end mask_frames
 
 
+def multiply_intensity_by_negative_laplacian_kernel(frame):
+    arr = np.copy(frame)
+    try:
+        Nx, Ny = frame.shape
+    except AttributeError:
+        print 'Failed: (idx, data.shape) = ({}, {})'.format(idx, data.shape)
+        raise
+    if args.searchAlongAxis in ('x', 'xy'):
+        for ix in xrange(Nx):
+            x = gaussian_convolution(frame[ix, :], args.sigma)
+            xpp = np.gradient(np.gradient(x))
+            arr[idx, :] *= normalized(-xpp)
+    if args.searchAlongAxis in ('y', 'xy'):
+        for iy in xrange(Ny):
+            y = gaussian_convolution(frame[:, iy], args.sigma)
+            ypp = np.gradient(np.gradient(y))
+            arr[:, iy] *= normalized(-ypp)
+    return normalized(arr)
+
 def multiply_intensity_by_negative_laplacian(data):
     timer = time.clock()
-    rval = []
-    for idx in args.include(data):
-        frame = data[idx]
-        arr = np.copy(frame)
-        try:
-            Nx, Ny = frame.shape
-        except AttributeError:
-            print 'Failed: (idx, data.shape) = ({}, {})'.format(idx, data.shape)
-            raise
-        if args.searchAlongAxis in ('x', 'xy'):
-            for ix in xrange(Nx):
-                x = gaussian_convolution(frame[ix, :], args.sigma)
-                xpp = np.gradient(np.gradient(x))
-                arr[idx, :] *= normalized(-xpp)
-        if args.searchAlongAxis in ('y', 'xy'):
-            for iy in xrange(Ny):
-                y = gaussian_convolution(frame[:, iy], args.sigma)
-                ypp = np.gradient(np.gradient(y))
-                arr[:, iy] *= normalized(-ypp)
-        rval.append(normalized(arr))
+    # --- serial --- #
+    if args.nproc == 1:
+        arr = np.array(
+            [multiply_intensity_by_negative_laplacian_kernel(data[idx])
+             for idx in args.include(data)])
+    # --- parallel --- #
+    else:
+        arr = np.array(Parallel(n_jobs=args.nproc)(
+            delayed(multiply_intensity_by_negative_laplacian_kernel)(data[idx])
+            for idx in args.include(data)))
     timer = time.clock() - timer
 
     if args.verbose > 0:
         sys.stdout.write('<frames elapsed={}>I*normalized(-Laplacian(I))' \
                          '</frames>\n'.format(timer))
-    return np.array(rval)
+    return arr
 #end multiply_intensity_by_negative_laplacian
 
 
+def optimized_frames_kernel(frame, mask):
+    return clean(frame*mask, threshold=args.peakreps*args.peakstep)
+    
 def optimized_frames(data, frameMasks):
     timer = time.clock()
-    filtered = []
-    for idx in args.include(data):
-        frame = data[idx]
-        mask = frameMasks[idx]
-        optim = clean(frame*mask, threshold=args.peakreps*args.peakstep)
-        filtered.append(optim)
+    # --- serial --- #
+    if args.nproc == 1:
+        filtered = np.array(
+            [optimized_frames_kernel(data[idx], frameMasks[idx])
+             for idx in args.include(data)])
+    # --- parallel --- #
+    else:
+        filtered = np.array(
+            Parallel(n_jobs=args.nproc)(
+                delayed(optimized_frames_kernel)(data[idx], frameMasks[idx])
+                for idx in args.include(data)))
     timer = time.clock() - timer
 
     if args.verbose > 0:
         sys.stdout.write('<frames elapsed={}>peaks cleaned' \
                          '</frames>\n'.format(timer))
-        
-    return np.array(filtered)
+    return filtered
 #end optimized_frames
 
 
-def peak_neighborhoods(data, frameMasks):
+def peak_neighborhoods(frameMasks):
     timer = time.clock()
-    maskLabels = []
-    for idx in args.include(data):
-        frame = data[idx]
-        mask = frameMasks[idx]
-        maskLabels.append(threshold_masks(mask, 0.5, direction='gt'))
+    # this cannot be parallelized because the return value is too
+    # large for the stack and will cause Parallel to fail
+    maskLabels = np.array(
+        [threshold_masks(frameMasks[idx], 0.5, direction='gt')
+         for idx in args.include(frameMasks)])
     timer = time.clock() - timer
 
     if args.verbose > 0:
         sys.stdout.write('<frames elapsed={}>peak neighborhoods' \
                          '</frames>\n'.format(timer))
 
-    return np.array(maskLabels)
+    return maskLabels
 #end peak_neighborhoods
 
 
+def feature_kernel(idx, mask, frame, optim, index, dstdir):
+    # spatial limits of this feature
+    xy = np.where(mask)
+    xlo, xhi = np.min(xy[0]), np.max(xy[0])+1
+    ylo, yhi = np.min(xy[1]), np.max(xy[1])+1
+    # convenience: slice of frame and filtered image
+    subframe = frame[xlo:xhi, ylo:yhi]
+    suboptim = optim[xlo:xhi, ylo:yhi]
+    # 2D array of indices to access this feature
+    subindex = index[xlo:xhi, ylo:yhi]
+    # get peak positions from filtered subframe (suboptim)
+    peakMasks = threshold_masks(suboptim, args.treeline,
+                                direction='gt', relative=True)
+    xpeaks = []
+    ypeaks = []
+    for pm in peakMasks:
+        # local maximum (peak)
+        ixy = np.argmax(suboptim[pm])
+        # position of peak (flattened index)
+        pos = (subindex[pm])[ixy]
+        # (x,y) position in index where position occurs
+        ix, iy = np.argwhere(index == pos)[0]
+        xpeaks.append(ix)
+        ypeaks.append(iy)
+    # save these peak positions
+    xy = np.array(zip(xpeaks, ypeaks))
+    # save this feature
+    filename = "{}/feature{:04}.png".format(dstdir, idx)
+    pts = xy - np.array([xlo, ylo])
+    write_image(filename, subframe, pts=pts, minsize=20/3.)
+    # return peak positions
+    return xy
+
+def peak_positions_kernel(idx, masks, frame, optim):
+    dstdir = 'frame{:03d}'.format(idx)
+    index = np.reshape(np.arange(optim.size), optim.shape)
+    # create a directory in which to store the features of this frame
+    dstdir = "frame{:03d}".format(idx)
+    featureno = 0
+    try:
+        # if dstdir already exists, then throw and OSError
+        os.mkdir(dstdir)
+    except OSError:
+        pass
+    # these are the masks for each feature (peak) neighborhood
+    # --- serial --- #
+    if args.nproc == 1:
+        peakPos = np.concatenate(
+            [feature_kernel(j, masks[j], frame, optim, index, dstdir)
+             for j in xrange(len(masks))], axis=0)
+    # --- parallel --- #
+    else:
+        peakPos = np.concatenate(Parallel(n_jobs=args.nproc)(
+            delayed(feature_kernel)(j, masks[j], frame, optim, index, dstdir)
+            for j in xrange(len(masks))), axis=0)
+    # these return an array (N, m_i, 2) where N = len(masks)
+    # and m_i = number of features in this peak neighborhood
+    # --- #
+    # write the peak positions
+#    if peakPos.size % 2 != 0:
+#        msg = 'Incomplete number of points\n' \
+#              '  {}\n' \
+#              '  {}\n' \
+#              '  {}'.format(peakPos.shape, type(peakPos), type(peakPos[0]))
+#        raise ValueError(msg)
+#    
+#    xy = np.ravel(peakPos).reshape((-1, 2))
+    prefix = '{}-{:03d}'.format(args.output, idx)
+    ofile = '{}.txt'.format(prefix)
+    write_peak_pos(ofile, peakPos)
+    # write the filtered image, including peak positions
+    ofile = '{}.png'.format(prefix)
+    write_image(ofile, optim, pts=peakPos, cmap=args.cmap)
+    # return the peak positions
+    return peakPos
+ 
 def peak_positions(data, filtered, maskLabels):
     """
     Returns a list of peak positions ((x0, y0), (x1, y1), ..., (xN, yN)).
     """
     timer = time.clock()
-    peakPos = []
-    for idx in args.include(data):
-        masks = maskLabels[idx]
-        frame = data[idx]
-        optim = filtered[idx]
-        index = np.reshape(np.arange(optim.size), optim.shape)
-        xpeaks = []
-        ypeaks = []
-        # create a directory in which to store the features of this frame
-        dstdir = "frame{:03d}".format(idx)
-        featureno = 0
-        try:
-            # if dstdir already exists, then throw and OSError
-            os.mkdir(dstdir)
-        except OSError:
-            pass
-        # these are the masks for each feature (peak) neighborhood
-        for m in masks:
-            # spatial limits of this feature
-            xy = np.where(m)
-            xlo, xhi = np.min(xy[0]), np.max(xy[0])+1
-            ylo, yhi = np.min(xy[1]), np.max(xy[1])+1
-            # convenience: slice of frame and filtered image
-            subframe = frame[xlo:xhi, ylo:yhi]
-            suboptim = optim[xlo:xhi, ylo:yhi]
-            # 2D array of indices to access this feature
-            subindex = index[xlo:xhi, ylo:yhi]
-            # get peak positions from filtered subframe (suboptim)
-            peakMasks = threshold_masks(suboptim, args.treeline,
-                                        direction='gt', relative=True)
-            for pm in peakMasks:
-                # local maximum (peak)
-                ixy = np.argmax(suboptim[pm])
-                # position of peak (flattened index)
-                pos = (subindex[pm])[ixy]
-                # (x,y) position in index where position occurs
-                ix, iy = np.argwhere(index == pos)[0]
-                xpeaks.append(ix)
-                ypeaks.append(iy)
-            # save this feature
-            filename = "{}/feature{:04}.png".format(dstdir, featureno)
-            featureno += 1
-            pts = np.array(zip(xpeaks, ypeaks)) - np.array([xlo, ylo])
-            write_image(filename, subframe, pts=pts, minsize=20/3.)
-        # store the (x, y) peak positions
-        xy = zip(xpeaks, ypeaks)
-        peakPos.append(xy)
-        # write the peak positions
-        prefix = '{}-{:03d}'.format(args.output, idx)
-        ofile = '{}.txt'.format(prefix)
-        write_peak_pos(ofile, xy)
-        # write the filtered image, including peak positions
-        ofile = '{}.png'.format(prefix)
-        write_image(ofile, optim, pts=peakPos[idx], cmap=args.cmap)
+    # serial and parallel (parallelize over features)
+    peakPos = np.array(
+        [peak_positions_kernel(idx, maskLabels[idx], data[idx], filtered[idx])
+         for idx in args.include(data)])
     timer = time.clock() - timer
 
     if args.verbose > 0:
         sys.stdout.write('<frames elapsed={}>peak positions' \
                          '</frames>\n'.format(timer))
-
-    return np.array(peakPos)
+    return peakPos
 #end peak_positions
 
 
@@ -603,11 +663,13 @@ def main ():
     filtered = optimized_frames(data, frameMasks)
 
     # --- identify each peak neighborhood in turn --- #
-    maskLabels = peak_neighborhoods(data, frameMasks)
+    maskLabels = peak_neighborhoods(frameMasks)
 
     # --- for each image and each peak neighborhood within that image
     # --- identify the peaks --- #
     peakPos = peak_positions(data, filtered, maskLabels)
+
+    # all peak positions and images have been written already #
 #end 'def main ():'
 
 
@@ -685,6 +747,12 @@ if __name__ == '__main__':
                             'associative map.) Each frame (image) is a 2D ' \
                             'matrix of intensity values at uniform steps in ' \
                             'eta (row) and omega (column).')
+        parser.add_argument('--np',
+                            dest='nproc',
+                            type=int,
+                            default=None,
+                            help='Set the number of processors that should ' \
+                            'used.')
         parser.add_argument('-o',
                             '--output-prefix',
                             dest='output',
