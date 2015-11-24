@@ -231,6 +231,8 @@ def ensure_square(img):
             # excess of rows: add columns
             return np.concatenate((img, np.zeros((img.shape[0], dj))),
                                   axis=1)
+    else:
+        return img
 #end ensure_square
 
 
@@ -401,9 +403,9 @@ def read_data():
     timer = time.clock() - timer
 
     if args.verbose > 0:
-        w, h = data[0].shape
+        num, w, h = data.shape
         sys.stdout.write('<frames width={}, height={}, count={}, elapsed={}>' \
-                         'read</frames>\n'.format(w, h, len(data), timer))
+                         'read</frames>\n'.format(w, h, num, timer))
 
     return data
 #end read_data    
@@ -411,7 +413,7 @@ def read_data():
 
 def square_frames(data):
     timer = time.clock()
-    square = [ensure_square(data[idx]) for idx in args.include(data)]
+    square = np.array([ensure_square(data[idx]) for idx in args.include(data)])
     timer = time.clock() - timer
 
     if args.verbose > 0:
@@ -425,13 +427,22 @@ def square_frames(data):
 
 def mask_frames(data):
     timer = time.clock()
-    frameMasks = [gaussian_filter(frame, sigma=args.sigma) > args.background
-                  for frame in data]
+    try:
+        frameMasks = np.array([
+            gaussian_filter(data[idx], sigma=args.sigma) > args.background
+            for idx in args.include(data)])
+    except:
+        print '<<< Failed>>>'
+        print '   data.shape = {}'.format(data.shape)
+        print '   frameMasks.shape = {}'.format(frameMasks.shape)
+        raise
     timer = time.clock() - timer
 
     if args.verbose > 0:
-        sys.stdout.write('<frames elapsed={}>mask gaussian convolution' \
-                         '</frames>\n'.format(timer))
+        num, w, h = frameMasks.shape
+        sys.stdout.write('<frames width={} height={} count={} elapsed={}>' \
+                         'mask gaussian convolution' \
+                         '</frames>\n'.format(w, h, num, timer))
 
     return frameMasks
 #end mask_frames
@@ -439,25 +450,32 @@ def mask_frames(data):
 
 def multiply_intensity_by_negative_laplacian(data):
     timer = time.clock()
+    rval = []
     for idx in args.include(data):
         frame = data[idx]
-        Nx, Ny = frame.shape
+        arr = np.copy(frame)
+        try:
+            Nx, Ny = frame.shape
+        except AttributeError:
+            print 'Failed: (idx, data.shape) = ({}, {})'.format(idx, data.shape)
+            raise
         if args.searchAlongAxis in ('x', 'xy'):
             for ix in xrange(Nx):
                 x = gaussian_convolution(frame[ix, :], args.sigma)
                 xpp = np.gradient(np.gradient(x))
-                frame[idx, :] = x*normalized(-xpp)
+                arr[idx, :] *= normalized(-xpp)
         if args.searchAlongAxis in ('y', 'xy'):
             for iy in xrange(Ny):
                 y = gaussian_convolution(frame[:, iy], args.sigma)
                 ypp = np.gradient(np.gradient(y))
-                frame[:, idx] = y*normalized(-ypp)
-        data[idx] = normalized(frame)
+                arr[:, iy] *= normalized(-ypp)
+        rval.append(normalized(arr))
     timer = time.clock() - timer
 
     if args.verbose > 0:
         sys.stdout.write('<frames elapsed={}>I*normalized(-Laplacian(I))' \
                          '</frames>\n'.format(timer))
+    return np.array(rval)
 #end multiply_intensity_by_negative_laplacian
 
 
@@ -475,7 +493,7 @@ def optimized_frames(data, frameMasks):
         sys.stdout.write('<frames elapsed={}>peaks cleaned' \
                          '</frames>\n'.format(timer))
         
-    return filtered
+    return np.array(filtered)
 #end optimized_frames
 
 
@@ -492,7 +510,7 @@ def peak_neighborhoods(data, frameMasks):
         sys.stdout.write('<frames elapsed={}>peak neighborhoods' \
                          '</frames>\n'.format(timer))
 
-    return maskLabels
+    return np.array(maskLabels)
 #end peak_neighborhoods
 
 
@@ -546,11 +564,12 @@ def peak_positions(data, filtered, maskLabels):
             pts = np.array(zip(xpeaks, ypeaks)) - np.array([xlo, ylo])
             write_image(filename, subframe, pts=pts, minsize=20/3.)
         # store the (x, y) peak positions
-        peakPos.append(zip(xpeaks, ypeaks))
+        xy = zip(xpeaks, ypeaks)
+        peakPos.append(xy)
         # write the peak positions
         prefix = '{}-{:03d}'.format(args.output, idx)
         ofile = '{}.txt'.format(prefix)
-        write_peak_pos(ofile, zip(xpeaks, ypeaks))
+        write_peak_pos(ofile, xy)
         # write the filtered image, including peak positions
         ofile = '{}.png'.format(prefix)
         write_image(ofile, optim, pts=peakPos[idx], cmap=args.cmap)
@@ -560,7 +579,7 @@ def peak_positions(data, filtered, maskLabels):
         sys.stdout.write('<frames elapsed={}>peak positions' \
                          '</frames>\n'.format(timer))
 
-    return peakPos
+    return np.array(peakPos)
 #end peak_positions
 
 
@@ -571,11 +590,14 @@ def main ():
 
     data = read_data()
 
+    # --- make the frames square (width == height) --- #
     data = square_frames(data)
 
+    # --- mask each feature --- #
     frameMasks = mask_frames(data)
 
-    multiply_intensity_by_negative_laplacian(data)
+    # --- exaggerate peaks and troughs --- #
+    data = multiply_intensity_by_negative_laplacian(data)
 
     # --- clean up the frames --- #
     filtered = optimized_frames(data, frameMasks)
