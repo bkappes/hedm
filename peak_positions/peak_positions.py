@@ -15,7 +15,11 @@ import shutil
 #from pexpect import run, spawn
 import numpy as np
 import scipy.io as sio
+# --- no need to connect to the X-server ---#
+import matplotlib
+matplotlib.use('Agg')
 from matplotlib import pyplot as plt
+# --- #
 from scipy.ndimage import gaussian_filter
 from skimage import measure
 from skimage.morphology import reconstruction
