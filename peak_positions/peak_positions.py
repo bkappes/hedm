@@ -40,6 +40,8 @@ def guess_format(filename):
     basename, ext = os.path.splitext(basename)
     if ext.lower() == '.mat':
         return 'MATLAB'
+    elif ext.lower() == '.ge2':
+        return 'ge2'
     else:
         raise ValueError('Could not deduce file format for {}'.format(filename))
 #end guess_format
@@ -176,6 +178,28 @@ def read_mat(filename, key):
     data = sio.loadmat(filename)
     return data[key]
 #end read_mat
+
+
+def read_ge2(filename, nrows=2048, ncols=2048,
+             headersize=8192, type=np.uint16):
+    blocksize=np.dtype(type).itemsize*nrows*ncols
+    # verify file size
+    with open(filename, 'rb') as ifs:
+        begin = ifs.tell()
+        ifs.seek(0, 2) # move to EOF
+        end = ifs.tell()
+        size = end - begin
+        size -= headersize
+        if size % blocksize != 0:
+            raise IOError('Invalid or corrupt file. A non-integer number ' \
+                          'of frames were detected.')
+    # read file
+    with open(filename, 'rb') as ifs:
+        header = ifs.read(headersize)
+        data = np.fromfile(ifs, dtype=type)
+    # return data
+    return np.reshape(data, (-1, nrows, ncols)).astype(float)
+#end 'def read_ge2(filename):'
 
 
 def write_image(filename, arr, pts=None, minsize=None, **kwds):
@@ -323,15 +347,19 @@ def process_input_formats():
                     sys.stdout.write('  {}\n'.format(key))
                 raise
         args.infun = lambda ifile: read_mat(ifile, key=args.iopt)
-        if args.verbose > 0:
-            sys.stdout.write('<option value={}>input format' \
-                             '</option>\n'.format(inputFormat))
-            sys.stdout.write('<option value={}>input options' \
-                             '</option>\n'.format(args.iopt))
+    elif inputFormat == 'ge2':
+        args.infun = lambda ifile: read_ge2(ifile, nrows=2048, ncols=2048,
+                                            headersize=8192, type=np.uint16)
     else:
         raise ValueError('Input format ({}) is not ' \
                          'recognized.'.format(inputFormat))
+    if args.verbose > 0:
+        sys.stdout.write('<option value={}>input format' \
+                         '</option>\n'.format(inputFormat))
+        sys.stdout.write('<option value={}>input options' \
+                         '</option>\n'.format(getattr(args, 'iopt', None)))
 
+            
 def process_nproc():
     global args
     maxproc = multiprocessing.cpu_count()
@@ -657,10 +685,13 @@ def main ():
     frameMasks = mask_frames(data)
 
     # --- exaggerate peaks and troughs --- #
-    data = multiply_intensity_by_negative_laplacian(data)
+    filtered = multiply_intensity_by_negative_laplacian(data)
 
     # --- clean up the frames --- #
-    filtered = optimized_frames(data, frameMasks)
+    filtered = optimized_frames(filtered, frameMasks)
+
+    # --- identify the frame masks on the filtered frames --- #
+    frameMasks = mask_frames(filtered)
 
     # --- identify each peak neighborhood in turn --- #
     maskLabels = peak_neighborhoods(frameMasks)
